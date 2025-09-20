@@ -23,15 +23,16 @@
 
 #include "CLI11.hpp"
 
-#include <cassert>
-#include <cmath>
+#include <algorithm>
+#include <cstdint>
+#include <cstdlib>
 #include <format>
 #include <fstream>
-#include <iostream>
-#include <limits>
+#include <iterator>
 #include <print>
 #include <random>
-#include <ranges>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 typedef std::mt19937 random_engine;
@@ -69,17 +70,19 @@ struct beta_binomial_sampler {
   }
 };
 
-[[nodiscard]] static auto
-write_design_matrix(const std::string &filename, const auto &group_indicator) {
+static auto
+write_design_matrix(const std::string &filename,
+                    const std::string &sample_name_prefix,
+                    const auto &group_indicator) {
   std::ofstream out(filename);
   if (!out)
     throw std::runtime_error("failed to open design output file: " + filename);
   std::println(out, "{}\t{}", "intercept", "factor");
   for (auto i = 0u; i < std::size(group_indicator); ++i)
-    std::println(out, "Sample{}\t1\t{}", i, group_indicator[i]);
+    std::println(out, "{}{}\t1\t{}", sample_name_prefix, i, group_indicator[i]);
 }
 
-[[nodiscard]] static auto
+static auto
 write_data_matrix_header(std::ofstream &out, const auto &n_individuals,
                          const std::string &colname_prefix) {
   std::uint32_t out_count = 0;
@@ -105,6 +108,9 @@ simulate_group(random_engine &rng, const double lambda_reads,
 
 int
 main(int argc, char *argv[]) {  // NOLINT(*-c-arrays)
+  static constexpr auto lambda_reads_default = 10.0;
+  static constexpr auto sample_name_prefix = "Sample";
+
   static constexpr auto command = "radmethsim";
   static const auto usage = std::format("Usage: radmethsim [options]", command);
 
@@ -112,19 +118,17 @@ main(int argc, char *argv[]) {  // NOLINT(*-c-arrays)
   std::string design_file;
   std::string rowname = "X";
 
-  // User parameters
-  std::uint32_t n_group0 = 30;
-  std::uint32_t n_group1 = 30;
-
   std::uint32_t n_rows = 1;
+  std::uint32_t n_individuals{};
+  std::uint32_t n_group0{};
+  std::uint32_t n_group1{};
 
-  double lambda_reads = 10.0;
+  double lambda_reads = lambda_reads_default;
 
-  double p0 = 0.5;
-  double p1 = 0.5;
-
-  // Shared dispersion parameter
-  double phi = 1.0;
+  double p{};
+  double p0{};
+  double p1{};
+  double phi = 1.0;  // shared dispersion parameter
 
   CLI::App app{};
   argv = app.ensure_utf8(argv);
@@ -132,13 +136,32 @@ main(int argc, char *argv[]) {  // NOLINT(*-c-arrays)
 
   // clang-format off
   app.set_help_flag("-h,--help", "print a detailed help message and exit");
-  app.add_option("--n-group0", n_group0, "size of group 1");
-  app.add_option("--n-group1", n_group1, "size of group 2");
-  app.add_option("--p0", p0, "p group 0");
-  app.add_option("--p1", p1, "p group 1");
+
+  // number of individuals (or per group)
+  auto n_group0_opt =
+    app.add_option("--n-group0", n_group0, "size of group 0");
+  auto n_group1_opt =
+    app.add_option("--n-group1", n_group1, "size of group 1");
+  n_group0_opt->needs(n_group1_opt);
+  n_group1_opt->needs(n_group0_opt);
+  const auto n_individuals_opt =
+    app.add_option("-c,--n-cols", n_individuals, "number of individuals")
+    ->excludes(n_group0_opt);
+
+  // methylation levels (or per group)
+  auto p0_opt = app.add_option("--p0", p0, "p group 0")
+    ->check(CLI::Range(0.0, 1.0));
+  auto p1_opt = app.add_option("--p1", p1, "p group 1")
+    ->check(CLI::Range(0.0, 1.0));
+  p0_opt->needs(p1_opt);
+  p1_opt->needs(p0_opt);
+  app.add_option("-p,--level", p, "methylation level")
+    ->check(CLI::Range(0.0, 1.0))
+    ->excludes(p0_opt);
+
   app.add_option("--reads", lambda_reads, "mean reads per site");
   app.add_option("-r,--n-rows", n_rows, "number of rows to generate");
-  app.add_option("-d,--dispersion", phi, "dispersion parameter");
+  app.add_option("--phi", phi, "dispersion parameter");
   app.add_option("-o,--output", outfile, "data output file")->required();
   app.add_option("-D,--design", design_file, "design output file")->required();
   app.add_option("--row-prefix", rowname, "rowname prefix");
@@ -150,6 +173,24 @@ main(int argc, char *argv[]) {  // NOLINT(*-c-arrays)
   }
   CLI11_PARSE(app, argc, argv);
 
+  if (n_individuals) {
+    n_group0 = n_individuals / 2;
+    n_group1 = n_individuals - n_group0;
+    p0 = p1 = p;
+  }
+  else
+    n_individuals = n_group0 + n_group1;
+
+  if (n_individuals == 0) {
+    std::println(std::cerr, "need to specify n individuals");
+    return EXIT_FAILURE;
+  }
+
+  if (p0 == 0.0) {
+    std::println(std::cerr, "need to specify methylation level");
+    return EXIT_FAILURE;
+  }
+
   std::random_device rd;
   random_engine rng(rd());
 
@@ -157,8 +198,7 @@ main(int argc, char *argv[]) {  // NOLINT(*-c-arrays)
   if (!out)
     throw std::runtime_error("failed to open data output file: " + outfile);
 
-  const auto n_individuals = n_group0 + n_group1;
-  write_data_matrix_header(out, n_individuals, "Sample");
+  write_data_matrix_header(out, n_individuals, sample_name_prefix);
 
   auto data = std::vector<count_pair>(n_individuals);
 
@@ -176,7 +216,7 @@ main(int argc, char *argv[]) {  // NOLINT(*-c-arrays)
   std::vector<std::uint32_t> group_indicators(n_group0, 0);
   group_indicators.insert(std::end(group_indicators), n_group1, 1);
 
-  write_design_matrix(design_file, group_indicators);
+  write_design_matrix(design_file, sample_name_prefix, group_indicators);
 
   return EXIT_SUCCESS;
 }
