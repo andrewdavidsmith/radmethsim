@@ -114,6 +114,7 @@ main(int argc, char *argv[]) {  // NOLINT(*-c-arrays)
   static constexpr auto command = "radmethsim";
   static const auto usage = std::format("Usage: radmethsim [options]", command);
 
+  bool sample_probabilities{};
   std::string outfile;
   std::string design_file;
   std::string rowname = "X";
@@ -165,6 +166,7 @@ main(int argc, char *argv[]) {  // NOLINT(*-c-arrays)
   app.add_option("-o,--output", outfile, "data output file")->required();
   app.add_option("-D,--design", design_file, "design output file")->required();
   app.add_option("--row-prefix", rowname, "rowname prefix");
+  app.add_flag("--sample-p", sample_probabilities, "sample values for p");
   // clang-format on
 
   if (argc < 2) {
@@ -186,10 +188,12 @@ main(int argc, char *argv[]) {  // NOLINT(*-c-arrays)
     return EXIT_FAILURE;
   }
 
-  if (p0 == 0.0) {
+  if (p0 == 0.0 && !sample_probabilities) {
     std::println(std::cerr, "need to specify methylation level");
     return EXIT_FAILURE;
   }
+
+  auto probability_distribution = std::uniform_real_distribution<>(0.0, 1.0);
 
   std::random_device rd;
   random_engine rng(rd());
@@ -203,6 +207,10 @@ main(int argc, char *argv[]) {  // NOLINT(*-c-arrays)
   auto data = std::vector<count_pair>(n_individuals);
 
   for (auto i = 0u; i < n_rows; ++i) {
+    if (sample_probabilities) {
+      p0 = probability_distribution(rng);
+      p1 = p0;
+    }
     data.clear();
     simulate_group(rng, lambda_reads, n_group0, p0, phi, data);
     simulate_group(rng, lambda_reads, n_group1, p1, phi, data);
